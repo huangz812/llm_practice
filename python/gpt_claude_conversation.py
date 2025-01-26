@@ -2,6 +2,7 @@ import anthropic
 import os
 import requests
 import time
+from colorama import Fore, Style
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -26,6 +27,12 @@ class Conversation:
         self.gpt_messages = ["Hey Bro!"]
         self.claude_messages = ["Hey Yo!"]
 
+    def __format_gpt_messages(self, msg):
+        return Fore.BLUE + msg + Style.RESET_ALL
+
+    def __format_claude_messages(self, msg):
+        return Fore.GREEN + msg + Style.RESET_ALL
+
     def _call_gpt(self):
         messages = [{"role": "system", "content": self.gpt_system}]
         for gpt, claude in zip(self.gpt_messages, self.claude_messages):
@@ -37,14 +44,14 @@ class Conversation:
             messages=messages,
             temperature=0.8,
             stream=True)
-        print("gpt: ", end="", flush=True)
+        print(self.__format_gpt_messages("gpt: "), end="", flush=True)
         # Handle stream response
         response_list = []
         for chunk in stream:
             delta = chunk.choices[0].delta.content or ''
             if delta:
                 # print without a newline.
-                print(delta, end="", flush=True)
+                print(self.__format_gpt_messages(delta), end="", flush=True)
                 response_list.append(delta)
         final_response = ''.join(response_list)
         # Append the response for history keeping
@@ -65,14 +72,14 @@ class Conversation:
             messages=messages,
             max_tokens=800,
             temperature=0.6)
-        print("claude: ", end="", flush=True)
+        print(self.__format_claude_messages("claude: "), end="", flush=True)
         # Handle stream response
         response_list = []
         # client.messages.stream() returns a MessageStreamManager
         # That's why we have to use context manager to access the text_stream field
         with result as stream:
             for text in stream.text_stream:
-                print(text, end="", flush=True)
+                print(self.__format_claude_messages(text), end="", flush=True)
                 response_list.append(text)
         final_response = ''.join(response_list)
         # Append the response for history keeping
@@ -112,8 +119,8 @@ if __name__ == "__main__":
 
     conversation = Conversation()
     # print the first two messages.
-    print(f"gpt: {conversation.gpt_messages[0]}")
-    print(f"claude: {conversation.claude_messages[0]}")
+    print(Fore.BLUE + f"gpt: {conversation.gpt_messages[0]}" + Style.RESET_ALL)
+    print(Fore.GREEN + f"claude: {conversation.claude_messages[0]}" + Style.RESET_ALL)
 
     try:
         while True:
