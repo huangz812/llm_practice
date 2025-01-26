@@ -1,6 +1,7 @@
 anthropic==0.45.0
 beautifulsoup4==4.12.3
 colorama==0.4.6
+gradio==5.13.1
 ollama==0.4.7
 openai==1.60.1
 python-dotenv==1.0.1
