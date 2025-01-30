@@ -1,8 +1,10 @@
-anthropic==0.45.0
+anthropic==0.45.2
 beautifulsoup4==4.12.3
 colorama==0.4.6
-gradio==5.13.1
+gradio==5.13.2
 ollama==0.4.7
-openai==1.60.1
+openai==1.60.2
+Pillow==11.1.0
+pydub==0.25.1
 python-dotenv==1.0.1
 Requests==2.32.3
