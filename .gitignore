@@ -10,3 +10,8 @@ ENV/
 env.bak/
 venv.bak
 .virtual_documents/
+
+# Ingore executable cpp files
+python/code_generator/Claude_optimized
+python/code_generator/GPT_optimized
+python/code_generator/Qwen_optimized
