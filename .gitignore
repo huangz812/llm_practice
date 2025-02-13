@@ -12,6 +12,12 @@ venv.bak
 .virtual_documents/
 
 # Ingore executable cpp files
-python/code_generator/Claude_optimized
-python/code_generator/GPT_optimized
-python/code_generator/Qwen_optimized
+Claude_optimized
+GPT_optimized
+Qwen_optimized
+
+# Ignore Chroma vector database
+vector_db/
+
+# Ingore knowledge-base
+knowledge-base/
