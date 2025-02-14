@@ -13,8 +13,8 @@ from langchain.memory import ConversationBufferMemory
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.schema import Document
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from sklearn.manifold import TSNE
@@ -24,17 +24,11 @@ class Rag:
         self._debug_mode = debug_mode
         self._model = "gpt-4o-mini"
         self._db_name = "vector_db"
-        self._embeddings = OpenAIEmbeddings()
         self._chunks = self._generate_document_chunks()
-        self._chroma_vector_store = self._setup_chroma_vector_store()
-        self._faiss_vector_store = self._setup_faiss_vector_store()
         self._selected_vector_store = None
-        # create a new Chat with OpenAI
-        self._llm = ChatOpenAI(temperature=0.7, model_name=self._model)
-        self._memory = None
-        # the retriever is an abstraction over the VectorStore that will be used during RAG
-        self._retriever = None
-        self._conversation_chain = None
+        self._selected_embeddings = None
+        # We need a stateful conversation_retrieval_chain, so we make it a member variable
+        self._conversation_retrieval_chain = None
         
 
     def run(self):
@@ -44,45 +38,64 @@ class Rag:
             with gr.Row():
                 selected_vector_store = gr.Dropdown(["Chroma", "FAISS"], label="Select vector store", value="Chroma")
             with gr.Row():
+                selected_embeddings = gr.Dropdown(["OpenAIEmbeddings", "HuggingFaceEmbeddings"],
+                                                  label="Select Embeddings", value="OpenAIEmbeddings")
+            with gr.Row():
                 message_box = gr.Textbox(label="Chat with our AI Assistant:")
             with gr.Row():
                 clear_button = gr.Button("Clear")
 
-            message_box.submit(self._chat, inputs=[message_box, chatbot_output, selected_vector_store],
+            message_box.submit(self._chat, inputs=[message_box, chatbot_output, selected_vector_store, selected_embeddings],
                                outputs=[message_box, chatbot_output])
 
             # Clear out chatbot_output and message_box
             selected_vector_store.change(lambda: [None, ""], inputs=None, outputs=[chatbot_output, message_box], queue=False)
             # Clear out chatbot_output and message_box
+            selected_embeddings.change(lambda: [None, ""], inputs=None, outputs=[chatbot_output, message_box], queue=False)
+            # Clear out chatbot_output and message_box
             clear_button.click(lambda: [None, ""], inputs=None, outputs=[chatbot_output, message_box], queue=False)
 
         ui.launch(inbrowser=True)
 
-    def _chat(self, message, history, selected_vector_store):
+    def _chat(self, message, history, selected_vector_store, selected_embeddings):
         # First add user message to history
         history += [{"role": "user", "content": message}]
-        if self._selected_vector_store is None or self._selected_vector_store != selected_vector_store:
+        # If it's a first time or any changes to vectorstore/embeddings, we need to re-initiate conversation_retrieval_chain
+        if (self._selected_vector_store is None or self._selected_vector_store != selected_vector_store
+            or self._selected_embeddings is None or self._selected_embeddings != selected_embeddings):
             self._selected_vector_store = selected_vector_store
+            self._selected_embeddings = selected_embeddings
+            # Set up embeddings
+            embeddings = None
+            if selected_embeddings == 'OpenAIEmbeddings':
+                embeddings = OpenAIEmbeddings()
+            else:
+                embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            # Set up vectorstore
+            vectorstore = None
+            if selected_vector_store == 'Chroma':
+                vectorstore = self._setup_chroma_vector_store(embeddings)
+            else:
+                vectorstore = self._setup_faiss_vector_store(embeddings)
+            # create a new Chat with OpenAI
+            llm = ChatOpenAI(temperature=0.7, model_name=self._model)
             # set up the conversation memory for the chat
-            self._memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
-            vectorstore = self._chroma_vector_store
-            if selected_vector_store == 'FAISS':
-                vectorstore = self._faiss_vector_store
+            memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
             # the retriever is an abstraction over the VectorStore that will be used during RAG
             # k is how many chunks to use
-            self._retriever = vectorstore.as_retriever(search_kwargs={"k": 25})
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 25})
             # putting it together: set up the conversation chain with the GPT 4o-mini LLM, the vector store and memory
-            self._conversation_chain = ConversationalRetrievalChain.from_llm(llm=self._llm,
-                                                                             retriever=self._retriever,
-                                                                             memory=self._memory,
+            self._conversation_retrieval_chain = ConversationalRetrievalChain.from_llm(llm=llm,
+                                                                             retriever=retriever,
+                                                                             memory=memory,
                                                                              callbacks=[StdOutCallbackHandler()] if self._debug_mode else None)
 
         if self._debug_mode:
-            retrieved_docs = self._retriever.get_relevant_documents(message)
+            retrieved_docs = self._conversation_retrieval_chain.retriever.get_relevant_documents(message)
             print(f'\nRetrieved docs from {selected_vector_store} vector store are: ', retrieved_docs)
 
 
-        result = self._conversation_chain.invoke({"question": message})
+        result = self._conversation_retrieval_chain.invoke({"question": message})
         answer = result["answer"]
         if self._debug_mode:
             print("\nAnswer: ", answer)
@@ -112,13 +125,13 @@ class Rag:
             print(f"Document types found: {', '.join(doc_types)}")
         return chunks
 
-    def _setup_chroma_vector_store(self):
+    def _setup_chroma_vector_store(self, embeddings):
         # Delete any existing chroma vector db
         if os.path.exists(self._db_name):
-            Chroma(persist_directory=self._db_name, embedding_function=self._embeddings).delete_collection()
+            Chroma(persist_directory=self._db_name, embedding_function=embeddings).delete_collection()
 
         # Create chroma vectorstore
-        vectorstore = Chroma.from_documents(documents=self._chunks, embedding=self._embeddings, persist_directory=self._db_name)
+        vectorstore = Chroma.from_documents(documents=self._chunks, embedding=embeddings, persist_directory=self._db_name)
         if self._debug_mode:
             print(f"Chroma Vectorstore created with {vectorstore._collection.count()} documents")
             collection = vectorstore._collection
@@ -128,8 +141,8 @@ class Rag:
             self._visualize_chroma_vector_store_in_3d(collection)
         return vectorstore
 
-    def _setup_faiss_vector_store(self):
-        vectorstore = FAISS.from_documents(self._chunks, embedding=self._embeddings)
+    def _setup_faiss_vector_store(self, embeddings):
+        vectorstore = FAISS.from_documents(self._chunks, embedding=embeddings)
         if self._debug_mode:
             total_vectors = vectorstore.index.ntotal
             dimensions = vectorstore.index.d
