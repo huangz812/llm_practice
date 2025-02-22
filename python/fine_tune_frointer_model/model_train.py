@@ -10,8 +10,12 @@ from items import Item
 import matplotlib.pyplot as plt
 import numpy as np
 import pickle
+import plotly.graph_objects as go
 from collections import Counter
 from testing import Tester
+# Used to reduce high dimensions to 3D
+from sklearn.manifold import TSNE
+from tqdm import tqdm
 # Imports for traditional machine learning
 import pandas as pd
 import numpy as np
@@ -21,13 +25,14 @@ from sklearn.preprocessing import StandardScaler
 # NLP related imports
 from sklearn.feature_extraction.text import CountVectorizer
 from gensim.models import Word2Vec
+from gensim.models.callbacks import CallbackAny2Vec
 from gensim.utils import simple_preprocess
 # Finally, more imports for more advanced machine learning
 from sklearn.svm import LinearSVR
 from sklearn.ensemble import RandomForestRegressor
 
 # Create model classes set
-MODEL_CLASSES = {"random", "constant", "linear_regression"}
+MODEL_CLASSES = {"random", "constant", "linear_regression", "bag_of_words", "word2vec"}
 
 TOP_ELECTRONICS_BRANDS = ["hp", "dell", "lenovo", "samsung", "asus", "sony", "canon", "apple", "intel"]
 
@@ -212,6 +217,132 @@ class LinearRegressionModel:
         return brand and brand.lower() in TOP_ELECTRONICS_BRANDS
 
 
+# Bag of Words Model
+class BagOfWordsModel:
+
+    def __init__(self, train, test):
+        np.random.seed(42)
+        self._train = train
+        self._test = test
+        self._model = LinearRegression()
+        # Used to turn documents into columns of words (features) and rows of # of occurences
+        # Capped at 1000 features at most and ignore common English words
+        self._vectorizer = CountVectorizer(max_features=1000, stop_words='english')
+        self._train_test_model()
+
+    def _train_test_model(self):
+        # Use test_prompt() which doesn't have price
+        train_documents = [item.test_prompt() for item in self._train]
+        train_prices = [item.price for item in self._train]
+        test_documents = [item.test_prompt() for item in self._test[:250]]
+        test_prices = [item.price for item in self._test[:250]]
+
+        # Train
+        X_train = self._vectorizer.fit_transform(train_documents)
+        self._model.fit(X_train, train_prices)
+        # Check overall stats. There are still feature names which are words names here
+        word_names = self._vectorizer.get_feature_names_out()
+        coefficients = self._model.coef_
+        # Get indices of top 10 coefficients by absolute value
+        top_indices = np.argsort(np.abs(coefficients))[-10:]
+        # Print top 10 feature coefficients
+        for idx in top_indices:
+            print(f"{word_names[idx]}: {coefficients[idx]:.4f}")
+
+        X_test = self._vectorizer.transform(test_documents)
+        y_pred = self._model.predict(X_test)
+        mse = mean_squared_error(test_prices, y_pred)
+        r2 = r2_score(test_prices, y_pred)
+        print(f"Mean Squared Error: {mse}")
+        print(f"R-squared Score: {r2}")
+
+    def _bow_lr_pricer(self, item):
+        test_doc = [item.test_prompt()]
+        X_test = self._vectorizer.transform(test_doc)
+        return max(self._model.predict(X_test)[0], 0)
+
+    def run(self, data):
+        Tester.test(self._bow_lr_pricer, data)
+
+class Word2VecModel:
+    def __init__(self, train, test):
+        np.random.seed(42)
+        self._train = train
+        self._test = test
+        self._model = LinearRegression()
+        self._w2v_model = None
+        self._train_test_model()
+
+    def _train_test_model(self):
+        # Define a callback to show a progress bar
+        class TqdmWord2Vec(CallbackAny2Vec):
+            def __init__(self, epochs):
+                self.epochs = epochs
+                self.pbar = tqdm(total=self.epochs, desc="Training Word2Vec", unit="epoch")
+    
+            def on_epoch_end(self, model):
+                self.pbar.update(1)  # Update progress bar after each epoch
+
+            def on_train_end(self, model):
+                self.pbar.close()  # Close progress bar when training is complete
+        
+        # Use test_prompt() which doesn't have price
+        train_documents = [item.test_prompt() for item in self._train]
+        train_prices = [item.price for item in self._train]
+        test_documents = [item.test_prompt() for item in self._test[:250]]
+        test_prices = [item.price for item in self._test[:250]]
+        # Preprocess each document into tokens and wrap in tqdm to show progress bar
+        processed_trained_docs = [simple_preprocess(doc) for doc in tqdm(train_documents, desc="Tokenizing Documents")]
+        # Train Word2Vec model
+        # Each word will have 400 dimensions (vectors)
+        # look ahead and look back window size is 5
+        # Include each word that occurs at least 1 time
+        # Parallel processing to 8 CPUs
+        epochs = 5
+        self._w2v_model = Word2Vec(sentences=processed_trained_docs, vector_size=400, window=5, min_count=1,
+                                   workers=8,
+                                   epochs=epochs,
+                                   callbacks=[TqdmWord2Vec(epochs)]  # Attach progress callback
+                                   )
+        # Extract word vectors and words
+        words = self._w2v_model.wv.index_to_key
+        word_vectors = np.array([self._w2v_model.wv[word] for word in words])
+
+        # verbose=1 prints out progress
+        tsne = TSNE(n_components=3, verbose=1, random_state=42)
+        # Reduce dimensions to 3D using t-SNE
+        # It has 3 columns each maps to x, y, z coordinates. Each row is a word
+        # Only show top 1000 most frequent words because the whole embeddings are more than 192k x 400 which is too big
+        top_1000_words = self._w2v_model.wv.index_to_key[:1000]
+        top_1000_word_vectors = np.array([self._w2v_model.wv[word] for word in top_1000_words])
+        word_vectors_3d = tsne.fit_transform(top_1000_word_vectors)
+        # Plotly 3D visualization
+        fig = go.Figure(data=[go.Scatter3d(
+            x=word_vectors_3d[:, 0],
+            y=word_vectors_3d[:, 1],
+            z=word_vectors_3d[:, 2],
+            mode='markers+text',
+            text=top_1000_words,
+            marker=dict(
+                size=8,
+                color='blue',     # Set color to blue for better visibility
+                opacity=0.8,
+                line=dict(width=1, color='black')
+            )
+        )])
+        # Update layout
+        fig.update_layout(
+            title="3D Top 1000 Word Embeddings Visualization",
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z'
+            ),
+            showlegend=False
+        )
+        # This will open a new tab in a browser and show the 3d graph
+        fig.show()
+    
 if __name__ == "__main__":
     # Create argument parser
     parser = argparse.ArgumentParser(description="Choose a price model")
@@ -251,6 +382,11 @@ if __name__ == "__main__":
     elif model_name == 'linear_regression':
         model = LinearRegressionModel(train, test)
         model.run(test)
+    elif model_name == 'bag_of_words':
+        model = BagOfWordsModel(train, test)
+        model.run(test)
+    elif model_name == 'word2vec':
+        model = Word2VecModel(train, test)
     else:
         print(f"Invalid model name. Choose from: {', '.join(MODEL_CLASSES)}")
         sys.exit(1)
