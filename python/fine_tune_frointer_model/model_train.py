@@ -286,9 +286,16 @@ class Word2VecModel:
         np.random.seed(42)
         self._train = train
         self._test = test
-        self._model = LinearRegression()
+        self._lr_model = LinearRegression()
+        self._linear_svr_model = LinearSVR()
+        # Use n_estimators=8 to spin off 8 decision tree models for fast training
+        # Use max_depth=8 for fast training. Use n_jobs=8 for 8 CPU processing
+        # Use verbose=2 to print out debugging messages
+        self._random_forest_model = RandomForestRegressor(n_estimators=8, max_depth=8, random_state=42, n_jobs=8,
+                                                          verbose=2)
         self._w2v_model = None
         self._train_test_model()
+
 
     def _plot_w2v_embeddings_in_3d(self):
         # verbose=1 prints out progress
@@ -333,7 +340,7 @@ class Word2VecModel:
         return np.mean(words_vector, axis=0) if words_vector else np.zero(self._w2v_model.vector_size)
 
     def _train_test_model(self, plot_w2v_embeddings=False):
-        # Define a callback to show a progress bar
+        # Define a callback for Word2Vec to show a progress bar
         class TqdmWord2Vec(CallbackAny2Vec):
             def __init__(self, epochs):
                 self.epochs = epochs
@@ -344,6 +351,7 @@ class Word2VecModel:
 
             def on_train_end(self, model):
                 self.pbar.close()  # Close progress bar when training is complete
+
         
         # Use test_prompt() which doesn't have price
         train_documents = [item.test_prompt() for item in self._train]
@@ -371,23 +379,38 @@ class Word2VecModel:
         if plot_w2v_embeddings:
             self._plot_w2v_embeddings_in_3d()
 
-        # Training
-        X_train = np.array([self._mean_pooling_document(document) for document in train_documents])
-        self._model.fit(X_train, train_prices)
+        X_train = np.array([self._mean_pooling_document(document) for document in tqdm(train_documents,
+                                                                                       desc="Mean pooling training docs")])
+        X_test = np.array([self._mean_pooling_document(document) for document in tqdm(test_documents,
+                                                                                      desc="Mean pooling testing docs")])
+
+        # Linear Regression Model
+        self._train_and_test(self._lr_model, X_train, train_prices, X_test, test_prices)
+
+        # Linear SVR model
+        self._train_and_test(self._linear_svr_model, X_train, train_prices, X_test, test_prices)
+
+        # RandomForest model
+        self._train_and_test(self._random_forest_model, X_train, train_prices, X_test, test_prices)
+
+    def _train_and_test(self, model, X_train, train_prices, X_test, test_prices):
+        # Train
+        model.fit(X_train, train_prices)
 
         # Testing
-        X_test = np.array([self._mean_pooling_document(document) for document in test_documents])
-        y_pred = self._model.predict(X_test)
+        y_pred = model.predict(X_test)
         mse = mean_squared_error(test_prices, y_pred)
         r2 = r2_score(test_prices, y_pred)
-        print(f"Mean Squared Error: {mse}")
-        print(f"R-squared Score: {r2}")
+        print(f"{model} - Mean Squared Error: {mse}")
+        print(f"{model} - R-squared Score: {r2}\n")
+
 
     # Test on individual item
+    # Use random forest as default
     def _w2v_pricer(self, item):
         X_test = self._mean_pooling_document(item.test_prompt())
         # Need to wrap the 1D np array in [] to turn to 2D np array which is required for model.predict
-        return max(self._model.predict([X_test])[0], 0)
+        return max(self._random_forest_model.predict([X_test])[0], 0)
 
     def run(self, data):
         Tester.test(self._w2v_pricer, data)
