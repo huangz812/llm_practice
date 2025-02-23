@@ -118,7 +118,7 @@ class LinearRegressionModel:
     def run(self, data):
         Tester.test(self._linear_regression_pricer, data)
 
-    # This function will be called for each item
+    # Test on individual item
     def _linear_regression_pricer(self, item):
         features = self._get_features(item)
         df = pd.DataFrame([features])
@@ -220,6 +220,13 @@ class LinearRegressionModel:
 # Bag of Words Model
 class BagOfWordsModel:
 
+    """
+    Step 1: use CountVectorizer to fit and transform training documents into X_train
+        Each row is a document. Each column corresponds to a specific word in the document and value is the count
+    Step 2: Use linear regression to train X_train, training prices
+    Step 3: use the same CountVectorizer to transform test documents into X_test
+    Step 4: Use linear regression to predict X_test on test prices
+    """
     def __init__(self, train, test):
         np.random.seed(42)
         self._train = train
@@ -256,6 +263,7 @@ class BagOfWordsModel:
         print(f"Mean Squared Error: {mse}")
         print(f"R-squared Score: {r2}")
 
+    # Test on individual item
     def _bow_lr_pricer(self, item):
         test_doc = [item.test_prompt()]
         X_test = self._vectorizer.transform(test_doc)
@@ -265,6 +273,15 @@ class BagOfWordsModel:
         Tester.test(self._bow_lr_pricer, data)
 
 class Word2VecModel:
+    """
+    Step 1: Feed all the trained documents (training data test_prompt) into w2v
+        The output is each row is a word and columns are dimensions of numbers
+    Step 2: Use mean pooling to generate a single fixed-size vector for each training document.
+        Together, it forms a feature matrix, each row is one document, columns are dimensions of numbers
+    Step 3: Use linear regression model to train the feature matrix against prices
+    Step 4: For each test document, get the w2v embedding from trained w2v
+    Step 5: Use linear regression model to predict test document's prices
+    """
     def __init__(self, train, test):
         np.random.seed(42)
         self._train = train
@@ -273,41 +290,7 @@ class Word2VecModel:
         self._w2v_model = None
         self._train_test_model()
 
-    def _train_test_model(self):
-        # Define a callback to show a progress bar
-        class TqdmWord2Vec(CallbackAny2Vec):
-            def __init__(self, epochs):
-                self.epochs = epochs
-                self.pbar = tqdm(total=self.epochs, desc="Training Word2Vec", unit="epoch")
-    
-            def on_epoch_end(self, model):
-                self.pbar.update(1)  # Update progress bar after each epoch
-
-            def on_train_end(self, model):
-                self.pbar.close()  # Close progress bar when training is complete
-        
-        # Use test_prompt() which doesn't have price
-        train_documents = [item.test_prompt() for item in self._train]
-        train_prices = [item.price for item in self._train]
-        test_documents = [item.test_prompt() for item in self._test[:250]]
-        test_prices = [item.price for item in self._test[:250]]
-        # Preprocess each document into tokens and wrap in tqdm to show progress bar
-        processed_trained_docs = [simple_preprocess(doc) for doc in tqdm(train_documents, desc="Tokenizing Documents")]
-        # Train Word2Vec model
-        # Each word will have 400 dimensions (vectors)
-        # look ahead and look back window size is 5
-        # Include each word that occurs at least 1 time
-        # Parallel processing to 8 CPUs
-        epochs = 5
-        self._w2v_model = Word2Vec(sentences=processed_trained_docs, vector_size=400, window=5, min_count=1,
-                                   workers=8,
-                                   epochs=epochs,
-                                   callbacks=[TqdmWord2Vec(epochs)]  # Attach progress callback
-                                   )
-        # Extract word vectors and words
-        words = self._w2v_model.wv.index_to_key
-        word_vectors = np.array([self._w2v_model.wv[word] for word in words])
-
+    def _plot_w2v_embeddings_in_3d(self):
         # verbose=1 prints out progress
         tsne = TSNE(n_components=3, verbose=1, random_state=42)
         # Reduce dimensions to 3D using t-SNE
@@ -342,6 +325,73 @@ class Word2VecModel:
         )
         # This will open a new tab in a browser and show the 3d graph
         fig.show()
+
+    def _mean_pooling_document(self, document):
+        words = simple_preprocess(document)
+        words_vector = [self._w2v_model.wv[word] for word in words if word in self._w2v_model.wv]
+        # Take mean across all rows (axis = 0)
+        return np.mean(words_vector, axis=0) if words_vector else np.zero(self._w2v_model.vector_size)
+
+    def _train_test_model(self, plot_w2v_embeddings=False):
+        # Define a callback to show a progress bar
+        class TqdmWord2Vec(CallbackAny2Vec):
+            def __init__(self, epochs):
+                self.epochs = epochs
+                self.pbar = tqdm(total=self.epochs, desc="Training Word2Vec", unit="epoch")
+    
+            def on_epoch_end(self, model):
+                self.pbar.update(1)  # Update progress bar after each epoch
+
+            def on_train_end(self, model):
+                self.pbar.close()  # Close progress bar when training is complete
+        
+        # Use test_prompt() which doesn't have price
+        train_documents = [item.test_prompt() for item in self._train]
+        train_prices = [item.price for item in self._train]
+        test_documents = [item.test_prompt() for item in self._test[:250]]
+        test_prices = [item.price for item in self._test[:250]]
+        # Preprocess each document into tokens and wrap in tqdm to show progress bar
+        processed_trained_docs = [simple_preprocess(doc) for doc in tqdm(train_documents,
+                                                                         desc="Tokenizing Train Documents")]
+        # Train Word2Vec model
+        # Each word will have 400 dimensions (vectors)
+        # look ahead and look back window size is 5
+        # Include each word that occurs at least 1 time
+        # Parallel processing to 8 CPUs
+        epochs = 5
+        self._w2v_model = Word2Vec(sentences=processed_trained_docs, vector_size=400, window=5, min_count=1,
+                                   workers=8,
+                                   epochs=epochs,
+                                   callbacks=[TqdmWord2Vec(epochs)]  # Attach progress callback
+                                   )
+        # Extract word vectors and words
+        words = self._w2v_model.wv.index_to_key
+        word_vectors = np.array([self._w2v_model.wv[word] for word in words])
+
+        if plot_w2v_embeddings:
+            self._plot_w2v_embeddings_in_3d()
+
+        # Training
+        X_train = np.array([self._mean_pooling_document(document) for document in train_documents])
+        self._model.fit(X_train, train_prices)
+
+        # Testing
+        X_test = np.array([self._mean_pooling_document(document) for document in test_documents])
+        y_pred = self._model.predict(X_test)
+        mse = mean_squared_error(test_prices, y_pred)
+        r2 = r2_score(test_prices, y_pred)
+        print(f"Mean Squared Error: {mse}")
+        print(f"R-squared Score: {r2}")
+
+    # Test on individual item
+    def _w2v_pricer(self, item):
+        X_test = self._mean_pooling_document(item.test_prompt())
+        # Need to wrap the 1D np array in [] to turn to 2D np array which is required for model.predict
+        return max(self._model.predict([X_test])[0], 0)
+
+    def run(self, data):
+        Tester.test(self._w2v_pricer, data)
+        
     
 if __name__ == "__main__":
     # Create argument parser
@@ -387,6 +437,7 @@ if __name__ == "__main__":
         model.run(test)
     elif model_name == 'word2vec':
         model = Word2VecModel(train, test)
+        model.run(test)
     else:
         print(f"Invalid model name. Choose from: {', '.join(MODEL_CLASSES)}")
         sys.exit(1)
